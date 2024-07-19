@@ -1,0 +1,249 @@
+---
+title: "DREAM Mixture ML Intro"
+author: "Joel Mainland"
+date: "2024-05-31"
+output:
+  html_document:
+    number_sections: false
+    toc: true
+    toc_float: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="~/Documents/R/DREAM Mixtures")
+
+if (!require("pacman")) install.packages("pacman")
+#Load packages
+pacman::p_load(tidyverse,randomForest,caret,GGally)
+
+theme_set(theme_light())
+
+#Note that I start with a brief slide show to re-introduce the challenge
+```
+
+# Look at the data
+
+```{r}
+
+#This is generated from Preprocessing.R
+mixturesWithFeatures <- read.csv("data/processed/MixturesWithFeatures.csv")
+
+# You can load from Dropbox if you are having issues loading from the workspace:
+# mixturesWithFeatures <- read.csv("https://www.dropbox.com/scl/fi/f75j07xedtsv3774con0k/MixturesWithFeatures.csv?rlkey=lyfw541vdb6byhpj1341etvnu&dl=1", row.names=NULL)
+
+glimpse(mixturesWithFeatures)
+
+```
+
+
+
+# Visualize the data
+
+```{r}
+
+mixturesWithFeatures %>%
+  ggplot(aes(x = experimental_values)) +
+  geom_histogram() +
+  labs(x="Percentage discrimination")
+
+```
+
+
+High values on the x-axis correspond to mixture pairs that are easy to discriminate. There are a handful of mixture pairs that are very similar to each other.
+
+```{r}
+ggpairs(mixturesWithFeatures,columns=c(4,9,10,11))
+
+```
+
+
+```{r}
+
+#Discrimination vs. Difference in size
+mixturesWithFeatures %>%
+  ggplot(aes(y = diff_mixture_size, x = experimental_values)) +
+  geom_point() +
+  geom_smooth(method = "lm")+
+  labs(x="Percentage discrimination",y="Difference in size")
+
+```
+
+
+In general, mixture pairs that differ in the number of components are easier to discriminate. This effect appears to be driven by the very similar pairs that are all also very similar in size.
+
+```{r}
+#Discrimination vs. Percentage overlap
+mixturesWithFeatures %>%
+  ggplot(aes(y = overlap_percent, x = experimental_values)) +
+  geom_point() +
+  geom_smooth(method = "lm")+
+  labs(x="Percentage discrimination",y="Percentage overlap")
+```
+
+
+In general, pairs with low overlap in components are easy to discriminate.
+
+We can see one mixture pair that has no overlap in molecules, but could only be discriminated on ~15% of trials. This is a possible metameric pair.
+
+Snitz et al., 2013 has a published algorithm for predicting how similar two mixtures are, and their data are in this training set. Let's see how well that model does on all of the data.
+
+```{r}
+#Discrimination vs. Angle Distance
+mixturesWithFeatures %>%
+  ggplot(aes(y = angle_dist, x = experimental_values)) +
+  geom_point() +
+  geom_smooth(method = "lm")+
+  labs(x="Percentage discrimination",y="Angle Distance")
+
+fit1 <- lm(angle_dist ~ experimental_values, data = mixturesWithFeatures)
+
+print(paste0("Adj R2 = ",signif(summary(fit1)$adj.r.squared, 5)))
+print(paste0(" P =",signif(summary(fit1)$coef[2,4], 5)))
+
+```
+
+
+# Basic machine learning
+
+## Split the data
+```{r}
+mixtures.clean <- mixturesWithFeatures %>% 
+  #mutate(ID = row_number()) %>%
+  select(experimental_values,diff_mixture_size,overlap_percent,angle_dist)
+
+#divide into training and test sets
+set.seed(42)
+# Create a data partition: 80% for training, 20% for testing
+trainIndex <- createDataPartition(mixtures.clean$experimental_values, p = 0.8, list = FALSE)
+
+# Create the training and testing sets
+train_set <- mixtures.clean[trainIndex, ]
+test_set <- mixtures.clean[-trainIndex, ]
+```
+
+## Linear Model
+```{r}
+#fit a linear model
+model_linear <- lm(experimental_values ~ diff_mixture_size + overlap_percent + angle_dist, data = train_set)
+
+# View the summary of the model
+summary(model_linear)
+
+```
+
+## Make predictions
+```{r}
+test_set$predicted <- predict(model_linear, newdata = test_set)
+
+test_set %>% 
+  ggplot(aes(x=experimental_values,y=predicted))+
+  geom_point() +
+  geom_smooth(method = "lm")+
+  labs(x="Percentage discrimination",y="Predicted")
+
+```
+
+## Characterize Performance
+```{r}
+# Calculate Mean Squared Error
+mse <- mean((test_set$experimental_values - test_set$predicted)^2)
+print(paste("Mean Squared Error:", mse))
+
+# Calculate R-squared on the test set
+ss_total <- sum((test_set$experimental_values - mean(test_set$experimental_values))^2)
+ss_residual <- sum((test_set$experimental_values - test_set$predicted)^2)
+r_squared <- 1 - (ss_residual / ss_total)
+print(paste("R-squared on test set:", r_squared))
+```
+
+
+# Random Forest
+
+```{r}
+
+#Build a random forest
+r = randomForest(experimental_values ~., data=train_set, importance=TRUE, do.trace=100)
+print(r)
+
+```
+Tree shows the number of trees at each stage of evaluation.
+MSE is the mean-squared error of the predictions for out-of-bag samples.
+Percentage of variance explained--higher is better.
+
+MSE decreases slightly as we increase the number of trees, but variance explained slightly decreases. The model stablilizes around 300 trees.
+
+Note that the final variance explained is much lower than the estimates. This is likely because we are overfitting with only three variables.
+```{r}
+#Now try it on the test set
+mixture.predict = predict(r, test_set)
+mixture.results <- cbind(test_set,Predicted=mixture.predict)
+
+mixture.results %>%
+  ggplot(aes(y = mixture.predict, x = experimental_values)) +
+  geom_point() +
+  geom_smooth(method = "lm")+
+  labs(x="Percentage discrimination",y="Random Forest Model")
+
+fit2 <- lm(mixture.predict ~ experimental_values, data = mixture.results)
+
+print(paste0("Adj R2 = ",signif(summary(fit2)$adj.r.squared, 5)))
+print(paste0(" P =",signif(summary(fit2)$coef[2,4], 5)))
+
+```
+
+
+```{r}
+importance(r)
+```
+
+%IncMSE: This column shows the percentage increase in the mean squared error (MSE) when a given variable is randomly permuted (its values are shuffled). A higher value indicates that the variable is more important for predicting the target variable because permuting it leads to a larger increase in the MSE.
+
+IncNodePurity: This column shows the total decrease in node impurity (measured by residual sum of squares for regression) that results from splits on this variable, averaged over all trees. A higher value indicates that the variable contributes more to reducing the impurity of nodes in the trees, thus making it a more important predictor.
+
+
+
+```{r}
+varImpPlot(r)
+```
+
+Difference in mixture size is the least important variable. The two metrics disagree on which of the other two predictors are more important
+
+# Simple caret structure
+
+```{r}
+
+#define training control
+fitControl <- trainControl(method = "repeatedcv",number = 5,repeats = 2) #5 fold cv, repeat 2 times
+
+rfFit<-train(experimental_values ~ diff_mixture_size + overlap_percent + angle_dist, data = train_set,
+             method = "rf",
+             trControl = fitControl,
+             metric="RMSE")
+#Look at performance in cross-validation
+print(rfFit)
+
+```
+
+
+# Ideas for contributing
+## Feature engineering
+
+Think of a new feature that might help us predict mixture discriminability and add it as a column to mixturesWithFeatures
+
+## Feature selection
+
+Although machine learning models are designed to figure out which features best predict the outcome variable, pruning features that are irrelevant will improve performance.
+
+## Model comparisons
+
+In the train block, you can change 'method = "rf"' to use a huge number of different models. Here is a list of possible models: https://topepo.github.io/caret/available-models.html
+
+## Additional data
+
+One of the most straightforward ways to improve a model is to train it on a larger dataset. Is there any dataset (for example at pyrfume.org) that can be used to train your model?
